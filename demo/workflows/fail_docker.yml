@@ -1,0 +1,43 @@
+# OpsGhost Demo Workflow 2: Docker Failure
+# ─────────────────────────────────────────
+# Intentionally references a non-existent Docker base image tag
+# to trigger a Docker build failure.
+#
+# To activate: copy this file + a broken Dockerfile to your target repo's
+# .github/workflows/ directory. See seed_failures.md for the Dockerfile.
+#
+# What OpsGhost should do:
+#   1. Detect: "docker" failure type
+#   2. Strategy: fix_dockerfile
+#   3. Fix: update FROM line to a valid image tag
+#   4. PR: "fix(docker): correct base image tag in Dockerfile"
+
+name: CI — Docker Build
+
+on:
+  push:
+    branches: ["main", "develop"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  docker-build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        # This will FAIL if Dockerfile uses a non-existent base image tag
+        # e.g. FROM python:3.11.999-slim  (does not exist)
+        run: |
+          docker build -t opsghost-demo:latest .
+
+      - name: Verify image
+        run: |
+          docker run --rm opsghost-demo:latest echo "Container OK"

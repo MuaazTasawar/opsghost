@@ -1,0 +1,54 @@
+# OpsGhost Demo Workflow 3: Test Failure
+# ───────────────────────────────────────
+# Runs a pytest suite that intentionally has a failing assertion.
+# OpsGhost should detect the test failure, classify it, and either
+# fix the test config or open a diagnostic PR.
+#
+# To activate: copy this file + tests/test_demo_fail.py to your
+# target repo. See seed_failures.md for the test file content.
+#
+# What OpsGhost should do:
+#   1. Detect: "test" failure type
+#   2. Strategy: fix_test_config OR add_comment_only
+#      (depends on whether it's a config issue or logic issue)
+#   3. PR: diagnostic report if logic issue, config fix if env issue
+
+name: CI — Test Suite
+
+on:
+  push:
+    branches: ["main", "develop"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+
+      - name: Run tests
+        # This will FAIL — the demo test has an intentional assertion error
+        run: |
+          pytest tests/test_demo_fail.py -v
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: pytest-results.xml
+          if-no-files-found: ignore

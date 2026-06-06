@@ -1,0 +1,45 @@
+# OpsGhost Demo Workflow 1: Dependency Failure
+# ─────────────────────────────────────────────
+# Intentionally installs a non-existent package version to trigger
+# a dependency failure that OpsGhost can classify and fix.
+#
+# To activate: copy this file to your target repo's .github/workflows/
+# Then push any commit to trigger it.
+#
+# What OpsGhost should do:
+#   1. Detect: "dependency" failure type
+#   2. Strategy: bump_dependency
+#   3. Fix: patch requirements.txt with a valid version
+#   4. PR: "fix(dependency): bump <package> to valid version"
+
+name: CI — Dependency Check
+
+on:
+  push:
+    branches: ["main", "develop"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  install-deps:
+    name: Install Python Dependencies
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        # This will FAIL — requests==99.99.99 does not exist
+        # OpsGhost should detect this as a dependency failure
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests==99.99.99
+
+      - name: Run app (never reached)
+        run: echo "App is running"
