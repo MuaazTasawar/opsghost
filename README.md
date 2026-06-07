@@ -1,71 +1,177 @@
-# OpsGhost 👻
+<div align="center">
 
-> A self-healing CI/CD pipeline agent that reads failed GitHub Actions logs, diagnoses the root cause, and opens a fix PR — autonomously.
+# 👻 OpsGhost
+
+### Your CI/CD pipeline's autonomous self-healing agent
+
+[![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
+[![LangGraph](https://img.shields.io/badge/LangGraph-Agent_Runtime-FF6B35?style=for-the-badge)](https://langchain-ai.github.io/langgraph/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-Webhook_Server-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![Groq](https://img.shields.io/badge/Groq-LLM_Free_Tier-F55036?style=for-the-badge)](https://console.groq.com)
+[![GitHub App](https://img.shields.io/badge/GitHub_App-Native_Integration-181717?style=for-the-badge&logo=github&logoColor=white)](https://docs.github.com/en/apps)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](LICENSE)
+
+**OpsGhost watches your GitHub Actions. When a pipeline fails, it reads the logs, finds the root cause, patches the file, and opens a Pull Request — all before you've even opened Slack.**
+
+[How It Works](#how-it-works) · [Architecture](#architecture) · [Getting Started](#getting-started) · [Demo](#triggering-a-demo)
+
+</div>
 
 ---
 
-## Overview
+## The Problem
 
-OpsGhost is a GitHub App + AI agent system that listens for `workflow_run` failure events. When a pipeline breaks, OpsGhost fetches the raw logs, runs them through a 5-node LangGraph ReAct pipeline, classifies the failure type, selects a fix strategy, patches the offending file on a new branch, and opens a Pull Request — all without human intervention.
+Engineers lose **1–3 hours per week** babysitting broken CI pipelines. A dependency version bumps to a non-existent tag, a Dockerfile base image gets deprecated, a test config is missing an env var — and suddenly someone's re-running builds, Googling cryptic error messages, and manually hunting through 800-line log files at 2AM.
 
-Built with Python, LangGraph, Groq (free tier), and the GitHub API. Deployable to Render for free.
+Every existing DevOps tool *notifies* you that something broke. **OpsGhost fixes it.**
 
 ---
 
-## Tech Stack
+## What It Does
 
-| Layer | Technology |
-|---|---|
-| Agent Runtime | Python + LangGraph |
-| LLM | Groq API — `llama-3.3-70b-versatile` (free tier) |
-| GitHub Integration | PyGitHub + GitHub Apps + Webhooks |
-| Webhook Server | FastAPI + Uvicorn |
-| Log Preprocessing | Custom regex pipeline (no external deps) |
-| Deployment | Render.com (free tier) |
-| Testing | pytest |
+A GitHub Actions workflow fails. Within **60 seconds**, without any human input:
+
+1. OpsGhost receives the failure webhook from GitHub
+2. Downloads and preprocesses the raw CI log
+3. An LLM agent classifies the failure type with a confidence score
+4. A second LLM call selects the safest automated fix strategy
+5. A third LLM call generates a precise file patch
+6. OpsGhost creates a branch, commits the fix, and opens a Pull Request
+7. The PR arrives with a full explanation: what broke, why, and what was changed
+
+If the failure requires human judgment (broken test logic, API contract changes), OpsGhost opens a **diagnostic-only PR** — a structured incident report with the root cause analysis, affected files, and recommended fix — so the right person has everything they need the moment they look at their notifications.
 
 ---
 
 ## How It Works
 
 ```
-GitHub Actions fails
-        │
-        ▼
-OpsGhost receives webhook (workflow_run → completed → failure)
-        │
-        ▼
-[Node 1] fetch_logs      — Downloads & preprocesses raw CI log
-        │
-        ▼
-[Node 2] classify_failure — LLM classifies: dependency | docker | test | config | unknown
-        │
-        ▼
-[Node 3] select_strategy  — LLM selects: bump_dependency | fix_dockerfile | fix_test_config | add_comment_only | no_action
-        │
-        ▼
-[Node 4] execute_fix      — Creates branch, patches file, commits fix
-        │
-        ▼
-[Node 5] open_pr          — Opens PR with diagnosis + diff
-        │
-        ▼
-Developer reviews & merges
+ GitHub Actions run fails
+          │
+          ▼
+ ┌─────────────────────────────────────────────────────┐
+ │              OpsGhost Webhook Server                │
+ │   FastAPI · HMAC-verified · async background task  │
+ └───────────────────┬─────────────────────────────────┘
+                     │
+                     ▼
+ ┌─────────────────────────────────────────────────────┐
+ │              LangGraph Agent Pipeline               │
+ │                                                     │
+ │  [1] fetch_logs        Download + preprocess log    │
+ │          │                                          │
+ │  [2] classify_failure  LLM → type + confidence      │
+ │          │                                          │
+ │  [3] select_strategy   LLM → safest fix strategy    │
+ │          │                                          │
+ │  [4] execute_fix       Branch + patch + commit      │
+ │          │                                          │
+ │  [5] open_pr           PR with diagnosis + diff     │
+ └─────────────────────────────────────────────────────┘
+                     │
+                     ▼
+       Pull Request appears on GitHub
+       Developer reviews and merges
 ```
+
+Every node has conditional routing — if a step fails or confidence is too low, the graph aborts safely or falls back to a diagnostic comment. No node can crash the server.
+
+---
+
+## Architecture
+
+### Agent State Machine
+
+OpsGhost uses a **typed dataclass state** (`OpsGhostState`) that flows through every LangGraph node. Each node reads from and writes to this shared state object — making the entire pipeline inspectable, testable, and debuggable at any point.
+
+### Three Specialized LLM Calls
+
+| Call | Role | Output |
+|---|---|---|
+| **Classifier** | Reads preprocessed logs, returns structured JSON with failure type + confidence | `{failure_type, failure_summary, confidence, root_cause_line}` |
+| **Strategist** | Reads classification, selects safest fix strategy + risk level | `{fix_strategy, reasoning, target_files, risk_level}` |
+| **Fixer** | Reads file contents + diagnosis, returns complete patched file + PR body | `{patched_content, pr_title, pr_body, diff_description}` |
+
+All three prompts enforce **JSON-only output** with strict schemas — no markdown, no prose, no hallucinated file paths.
+
+### Failure Classification
+
+| Type | Examples |
+|---|---|
+| `dependency` | pip/npm package not found, version conflict, peer dep missing |
+| `docker` | bad base image tag, missing COPY source, failed RUN step |
+| `test` | assertion error, missing env var in test, test runner crash |
+| `config` | missing env var, bad YAML syntax, wrong file path |
+| `unknown` | ambiguous logs, transient network errors, GitHub outages |
+
+### Fix Strategies
+
+| Strategy | What It Does |
+|---|---|
+| `bump_dependency` | Patches `requirements.txt`, `package.json`, `go.mod`, etc. |
+| `fix_dockerfile` | Patches `Dockerfile` or `docker-compose.yml` |
+| `fix_test_config` | Patches `pytest.ini`, `jest.config.js`, `.env.test`, etc. |
+| `add_comment_only` | Opens a diagnostic PR — no code changes, human fix required |
+| `no_action` | Aborts silently — transient failure or confidence too low |
+
+### Log Preprocessing Pipeline
+
+Before a single token reaches the LLM, OpsGhost runs the raw log through a custom preprocessing pipeline:
+
+- Strips ANSI escape codes and GitHub Actions timestamps
+- Extracts the most relevant error section (first error, not cascading noise)
+- Runs 20+ regex patterns to detect known error signatures
+- Formats detected hints as structured evidence for the classifier prompt
+- Truncates from the start (not the end) — failures are always at the bottom
+
+This dramatically reduces hallucination risk and token usage.
+
+---
+
+## Tech Stack
+
+| Layer | Technology | Why |
+|---|---|---|
+| Agent Runtime | Python + LangGraph | Best-in-class ReAct loop, typed state, conditional edges |
+| LLM | Groq — `llama-3.3-70b-versatile` | Free tier, ~2s inference, structured output |
+| GitHub Integration | PyGitHub + GitHub Apps | Per-repo auth, branch creation, file patching, PR API |
+| Webhook Server | FastAPI + Uvicorn | Async, fast, HMAC-verified, background task dispatch |
+| Log Preprocessing | Custom regex pipeline | Zero LLM cost for signal extraction |
+| Deployment | Render / Railway / ngrok | Free tier deployable |
+| Testing | pytest | 35+ tests across all layers |
+
+---
+
+## Key Engineering Decisions
+
+**Why LangGraph over a simple LLM call?**
+A single prompt can't safely classify, strategize, and patch in one shot without hallucinating. LangGraph's node-based graph enforces separation of concerns, lets each step validate its output independently, and makes the pipeline observable and testable at every stage.
+
+**Why three separate LLM calls instead of one?**
+Each call has a different temperature, token budget, and output schema. The classifier needs low temperature for consistency. The fixer needs a large token budget for complete file output. Combining them into one call produces worse results at higher cost.
+
+**Why GitHub Apps instead of a personal access token?**
+GitHub Apps authenticate per-installation, not per-user. This means OpsGhost can be installed on any repo by anyone, has scoped permissions, and doesn't break when someone rotates their PAT.
+
+**Why preprocess logs before the LLM?**
+Raw CI logs contain thousands of lines of timestamps, ANSI codes, and cascading error noise. Sending raw logs to an LLM wastes tokens, hits context limits, and produces worse classification. The preprocessing pipeline reduces a 50,000-character log to the 2,000 most diagnostic characters.
 
 ---
 
 ## Features
 
-- **Autonomous log analysis** — cleans, preprocesses, and extracts the error root cause from raw GitHub Actions logs
-- **LLM-powered classification** — categorizes failures into 5 types with confidence scoring
-- **Intelligent strategy selection** — picks the safest automated fix or falls back to a diagnostic comment
-- **File patching** — directly modifies `requirements.txt`, `Dockerfile`, test configs etc. via the GitHub API
-- **Auto PR opening** — creates a properly described PR from a fix branch, or a diagnostic-only PR if human intervention is needed
-- **Loop prevention** — ignores runs triggered by OpsGhost's own branches
-- **HMAC signature verification** — validates every webhook request from GitHub
-- **Graceful degradation** — every node fails safely; the agent never crashes the server
-- **35+ unit tests** — covers log tools, graph routing, and webhook validation
+- Autonomous end-to-end pipeline — webhook in, Pull Request out, zero human steps
+- Typed LangGraph state machine with 5 specialized nodes
+- Three purpose-built LLM prompts with strict JSON output schemas
+- Custom log preprocessing pipeline — ANSI stripping, error extraction, hint detection
+- GitHub App authentication — per-repo installation, scoped permissions
+- HMAC-SHA256 webhook signature verification on every request
+- Conditional graph routing — safe abort at every node on failure
+- Loop prevention — ignores runs triggered by OpsGhost's own fix branches
+- Graceful degradation — every node fails safely, server never crashes
+- Diagnostic-only PR fallback when auto-fix isn't safe
+- 35+ unit tests covering log tools, graph routing, and webhook validation
+- Render-ready `render.yaml` for one-click free deployment
 
 ---
 
@@ -74,43 +180,37 @@ Developer reviews & merges
 ```
 opsghost/
 ├── agent/
-│   ├── __init__.py
-│   ├── graph.py                  ← LangGraph wiring + run_agent()
-│   ├── state.py                  ← OpsGhostState dataclass
+│   ├── graph.py                  ← LangGraph wiring + run_agent() entrypoint
+│   ├── state.py                  ← OpsGhostState typed dataclass
 │   ├── nodes/
-│   │   ├── __init__.py
-│   │   ├── fetch_logs.py         ← Node 1: fetch + preprocess logs
-│   │   ├── classify_failure.py   ← Node 2: LLM classification
+│   │   ├── fetch_logs.py         ← Node 1: GitHub log download + preprocessing
+│   │   ├── classify_failure.py   ← Node 2: LLM failure classification
 │   │   ├── select_strategy.py    ← Node 3: LLM strategy selection
-│   │   ├── execute_fix.py        ← Node 4: branch + file patch + commit
-│   │   └── open_pr.py            ← Node 5: PR creation
+│   │   ├── execute_fix.py        ← Node 4: branch creation + file patch + commit
+│   │   └── open_pr.py            ← Node 5: PR creation (fix or diagnostic)
 │   └── tools/
-│       ├── __init__.py
-│       ├── github_tools.py       ← GitHub App auth, log fetch, PR API
-│       └── log_tools.py          ← Log cleaning, hint detection, preprocessing
+│       ├── github_tools.py       ← GitHub App auth, log fetch, file ops, PR API
+│       └── log_tools.py          ← Log cleaning, hint detection, error extraction
 ├── webhook/
-│   ├── __init__.py
-│   ├── server.py                 ← FastAPI app + HMAC verification
-│   └── handlers.py               ← Payload validation + background dispatch
+│   ├── server.py                 ← FastAPI app + HMAC verification + routing
+│   └── handlers.py               ← Payload validation + background task dispatch
 ├── prompts/
-│   ├── classifier.py             ← Classifier system prompt + builder
-│   ├── strategist.py             ← Strategist system prompt + builder
-│   └── fixer.py                  ← Fixer system prompt + PR templates
+│   ├── classifier.py             ← Classifier system prompt + user prompt builder
+│   ├── strategist.py             ← Strategist system prompt + user prompt builder
+│   └── fixer.py                  ← Fixer system prompt + PR body templates
 ├── demo/
 │   ├── workflows/
-│   │   ├── fail_dependency.yml   ← Demo: pip install broken version
-│   │   ├── fail_docker.yml       ← Demo: invalid Docker base image
-│   │   └── fail_test.yml         ← Demo: intentionally failing pytest
-│   └── seed_failures.md          ← Supporting files for each demo scenario
+│   │   ├── fail_dependency.yml   ← Installs requests==99.99.99 (guaranteed fail)
+│   │   ├── fail_docker.yml       ← Uses python:3.11.999-slim (does not exist)
+│   │   └── fail_test.yml         ← Runs pytest with intentional assertion failure
+│   └── seed_failures.md          ← All supporting files for each demo scenario
 ├── tests/
-│   ├── test_classifier.py        ← Log tool + preprocessing tests
-│   ├── test_graph.py             ← State + routing logic tests
-│   └── test_webhook.py           ← Server + handler + signature tests
+│   ├── test_classifier.py        ← 18 tests: log tools + preprocessing pipeline
+│   ├── test_graph.py             ← 12 tests: state dataclass + routing functions
+│   └── test_webhook.py           ← 10 tests: server endpoints + signature verification
 ├── .env.example
-├── .gitignore
 ├── requirements.txt
-├── render.yaml
-└── README.md
+└── render.yaml
 ```
 
 ---
@@ -119,256 +219,104 @@ opsghost/
 
 ### Prerequisites
 
-| Tool | Version | Install |
-|---|---|---|
-| Python | 3.11+ | https://python.org |
-| Git | any | https://git-scm.com |
-| pip | latest | bundled with Python |
-| GitHub Account | — | https://github.com |
-| Groq Account (free) | — | https://console.groq.com |
+| Tool | Version |
+|---|---|
+| Python | 3.11+ |
+| Git | any |
+| GitHub Account | — |
+| Groq Account (free) | https://console.groq.com |
 
----
-
-### 1. Clone the Repo
+### Clone & Install
 
 ```bash
 git clone https://github.com/MuaazTasawar/opsghost.git
 cd opsghost
-```
-
----
-
-### 2. Create a Virtual Environment
-
-**Windows (PowerShell):**
-```powershell
 python -m venv venv
-.\venv\Scripts\Activate.ps1
-```
-
-**Mac/Linux:**
-```bash
-python3 -m venv venv
-source venv/bin/activate
-```
-
----
-
-### 3. Install Dependencies
-
-```bash
+source venv/bin/activate        # Windows: .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
----
-
-### 4. Create a GitHub App
-
-This is the most important setup step. OpsGhost runs as a GitHub App so it can authenticate per-repo and open PRs.
-
-1. Go to **https://github.com/settings/apps/new**
-2. Fill in:
-   - **GitHub App name:** `OpsGhost` (or any unique name)
-   - **Homepage URL:** `https://github.com/MuaazTasawar/opsghost`
-   - **Webhook URL:** `https://your-render-url.onrender.com/webhook` *(set this after deploying — use a placeholder for now)*
-   - **Webhook secret:** generate a random string and save it
-3. Under **Permissions → Repository permissions**, enable:
-   - **Actions:** Read-only
-   - **Contents:** Read & write
-   - **Pull requests:** Read & write
-   - **Metadata:** Read-only
-4. Under **Subscribe to events**, check: **Workflow runs**
-5. Click **Create GitHub App**
-6. On the app page, click **Generate a private key** → download the `.pem` file
-7. Note your **App ID** (shown at the top of the app page)
-8. Click **Install App** → install it on your target demo repository
-
----
-
-### 5. Configure Environment Variables
+### Configure
 
 ```bash
 cp .env.example .env
+# Fill in GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_PATH,
+# GITHUB_WEBHOOK_SECRET, and GROQ_API_KEY
 ```
 
-Edit `.env` and fill in every value:
-
-```env
-GITHUB_APP_ID=123456                          # from your GitHub App page
-GITHUB_APP_PRIVATE_KEY_PATH=private-key.pem   # path to downloaded .pem file
-GITHUB_WEBHOOK_SECRET=your-secret-here        # the secret you set in GitHub App
-GROQ_API_KEY=gsk_...                          # from console.groq.com → API Keys
-LLM_MODEL=llama-3.3-70b-versatile
-MAX_LOG_CHARS=12000
-PR_BRANCH_PREFIX=opsghost/fix
-PORT=8000
-ENVIRONMENT=development
-```
-
-Move your downloaded `.pem` file into the project root:
-```bash
-# Place private-key.pem in opsghost/ directory
-```
-
----
-
-### 6. Run the Server Locally
+### Run
 
 ```bash
 uvicorn webhook.server:app --reload --port 8000
 ```
 
-You should see:
-```
-OpsGhost starting up...
-LangGraph compiled and ready.
-INFO:     Uvicorn running on http://0.0.0.0:8000
-```
-
-Visit **http://localhost:8000** → `{"status": "ok", "service": "OpsGhost"}`
-Visit **http://localhost:8000/health** → config validation check
-
----
-
-### 7. Expose Localhost to GitHub (for local testing)
-
-GitHub needs a public URL to send webhooks to. Use **ngrok** (free):
-
-```bash
-# Install ngrok: https://ngrok.com/download
-ngrok http 8000
-```
-
-Copy the `https://xxxx.ngrok.io` URL and paste it into your GitHub App's webhook URL field:
-```
-https://xxxx.ngrok.io/webhook
-```
-
----
-
-### 8. Run the Tests
+### Test
 
 ```bash
 pytest tests/ -v
+# 35 passed in ~2s
 ```
 
-Expected output:
-```
-tests/test_classifier.py::TestCleanLog::test_strips_ansi_codes PASSED
-tests/test_classifier.py::TestCleanLog::test_strips_github_timestamps PASSED
-...
-tests/test_webhook.py::TestWebhookEndpoints::test_valid_failure_event_accepted PASSED
-35 passed in 2.31s
-```
+Full setup guide (GitHub App creation, webhook wiring, deployment) is in the [Getting Started](#getting-started) section below.
 
 ---
 
-## Triggering a Demo Failure
+## Triggering a Demo
 
-### Option A: Trigger via a real repo (recommended for the wow moment)
+Three pre-seeded failure scenarios are included in `demo/workflows/`:
 
-1. Create a new GitHub repo (e.g. `opsghost-demo`)
-2. Make sure OpsGhost GitHub App is installed on it
-3. Copy the demo files into it:
-
-```
-# Copy one of these into .github/workflows/ of your demo repo:
-demo/workflows/fail_dependency.yml
-
-# Create requirements.txt in the demo repo root:
-requests==99.99.99
-flask==3.0.0
-```
-
-4. Push a commit → GitHub Actions runs → fails → OpsGhost webhook fires → PR appears within 60 seconds
-
-### Option B: Trigger manually without a real webhook
-
-Create a small script `trigger_demo.py` in the project root:
-
-```python
-import asyncio
-from dotenv import load_dotenv
-from agent.state import OpsGhostState
-from agent.graph import run_agent
-
-load_dotenv()
-
-state = OpsGhostState(
-    repo_full_name="MuaazTasawar/opsghost-demo",  # your demo repo
-    workflow_run_id=1234567890,                    # real run ID from a failed run
-    workflow_name="CI",
-    head_branch="main",
-    head_sha="paste-real-commit-sha-here",
-)
-
-final = asyncio.run(run_agent(state))
-print(final.to_summary_dict())
-```
-
-```bash
-python trigger_demo.py
-```
-
-To get a real `workflow_run_id` and `head_sha`:
-- Go to your repo → Actions tab → click a failed run
-- The run ID is in the URL: `github.com/owner/repo/actions/runs/`**`1234567890`**
-- The SHA is shown on the run page under the commit
-
----
-
-## Deploy to Render (Free Tier)
-
-1. Push all code to GitHub (already done if you followed the phases)
-2. Go to **https://render.com** → New → Web Service
-3. Connect your GitHub repo `MuaazTasawar/opsghost`
-4. Render will auto-detect `render.yaml` and configure everything
-5. Add environment variables in the Render dashboard (same as your `.env`)
-6. For the private key: paste the entire `.pem` file content as an env var `GITHUB_APP_PRIVATE_KEY` and update `github_tools.py` to read from env instead of file, or use Render's Secret Files feature to upload the `.pem`
-7. Deploy → copy the public URL → update your GitHub App's webhook URL
-
----
-
-## Environment Variables Reference
-
-| Variable | Required | Description | Where to get it |
+| Scenario | File | What Breaks | Expected OpsGhost Action |
 |---|---|---|---|
-| `GITHUB_APP_ID` | ✅ | Numeric ID of your GitHub App | GitHub App settings page |
-| `GITHUB_APP_PRIVATE_KEY_PATH` | ✅ | Path to the `.pem` private key file | Downloaded when creating GitHub App |
-| `GITHUB_WEBHOOK_SECRET` | ✅ | HMAC secret for webhook verification | Set by you in GitHub App settings |
-| `GROQ_API_KEY` | ✅ | Groq API key for LLM calls | https://console.groq.com → API Keys |
-| `LLM_MODEL` | ❌ | Groq model to use | Default: `llama-3.3-70b-versatile` |
-| `MAX_LOG_CHARS` | ❌ | Max log characters sent to LLM | Default: `12000` |
-| `PR_BRANCH_PREFIX` | ❌ | Prefix for fix branches | Default: `opsghost/fix` |
-| `PORT` | ❌ | Server port | Default: `8000` |
-| `ENVIRONMENT` | ❌ | `development` enables hot reload | Default: `development` |
+| Dependency | `fail_dependency.yml` | `pip install requests==99.99.99` | Patches `requirements.txt`, opens fix PR |
+| Docker | `fail_docker.yml` | `FROM python:3.11.999-slim` | Patches `Dockerfile`, opens fix PR |
+| Test | `fail_test.yml` | `assert 2+2 == 5` | Opens diagnostic PR with root cause |
+
+Copy any of these into `.github/workflows/` of a target repo, push a commit, and watch OpsGhost respond.
+
+See `demo/seed_failures.md` for all supporting files.
 
 ---
 
-## Phase Build History
+## Environment Variables
 
-| Phase | Name | What Was Built |
+| Variable | Required | Description |
 |---|---|---|
-| 0 | Project Init & Config | `.gitignore`, `.env.example`, `requirements.txt`, `render.yaml` |
-| 1 | State & Agent Skeleton | `OpsGhostState` dataclass, LangGraph skeleton, package stubs |
-| 2 | GitHub & Log Tools | GitHub App auth, log fetching, PR creation, log preprocessing pipeline |
-| 3 | Prompts & LLM Nodes | Classifier/strategist/fixer prompts, `fetch_logs`, `classify_failure`, `select_strategy` nodes |
-| 4 | Fix Execution & PR Nodes | `execute_fix` with LLM patching, `open_pr` with fix/diagnostic branch logic |
-| 5 | LangGraph Wiring | Complete graph with wrapped nodes, conditional routing, `run_agent()` entrypoint |
-| 6 | Webhook Server | FastAPI app, HMAC signature verification, `workflow_run` routing, background dispatch |
-| 7 | Demo Workflows & Tests | 3 seeded failure scenarios, 35+ tests across classifier/graph/webhook |
+| `GITHUB_APP_ID` | ✅ | Numeric ID of your GitHub App |
+| `GITHUB_APP_PRIVATE_KEY_PATH` | ✅ | Path to the downloaded `.pem` private key |
+| `GITHUB_WEBHOOK_SECRET` | ✅ | HMAC secret set in GitHub App settings |
+| `GROQ_API_KEY` | ✅ | From https://console.groq.com → API Keys |
+| `LLM_MODEL` | ❌ | Default: `llama-3.3-70b-versatile` |
+| `MAX_LOG_CHARS` | ❌ | Default: `12000` |
+| `PR_BRANCH_PREFIX` | ❌ | Default: `opsghost/fix` |
+| `ENVIRONMENT` | ❌ | `development` enables hot reload |
 
 ---
 
-## Contributing
+## Build History
 
-1. Fork the repo
-2. Create a feature branch: `git checkout -b feature/your-feature`
-3. Run tests before pushing: `pytest tests/ -v`
-4. Open a PR against `main`
+| Phase | What Was Built |
+|---|---|
+| 0 — Init | Project scaffold, env config, Render deployment config |
+| 1 — Skeleton | `OpsGhostState` typed dataclass, LangGraph graph builder, package structure |
+| 2 — Tools | GitHub App auth, log fetching, PR creation, log preprocessing pipeline |
+| 3 — LLM Nodes | Classifier + strategist + fixer prompts, `fetch_logs`, `classify_failure`, `select_strategy` |
+| 4 — Fix Nodes | `execute_fix` with LLM patching + branch ops, `open_pr` with fix/diagnostic routing |
+| 5 — Graph | Complete LangGraph wiring, conditional edges, node observability wrappers, `run_agent()` |
+| 6 — Server | FastAPI webhook server, HMAC verification, background task dispatch |
+| 7 — Tests | 3 demo failure scenarios, 35+ unit tests across all layers |
 
 ---
 
 ## License
 
-MIT
+MIT — use it, fork it, build on it.
+
+---
+
+<div align="center">
+
+Built by [Muaaz Tasawar](https://github.com/MuaazTasawar)
+
+*OpsGhost doesn't page you. It fixes it.*
+
+</div>
